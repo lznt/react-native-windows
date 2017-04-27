@@ -6,7 +6,13 @@ using ReactNative.UIManager;
 using ReactNative.UIManager.Annotations;
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
 using System.Reactive.Disposables;
+using System.Threading.Tasks;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
+using Windows.UI;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Media;
@@ -17,7 +23,7 @@ namespace ReactNative.Views.Image
     /// <summary>
     /// The view manager responsible for rendering native images.
     /// </summary>
-    public class ReactImageManager : SimpleViewManager<Border>
+    public class ReactImageManager : BaseViewManager<Border, ReactImageShadowNode>
     {
         private readonly Dictionary<int, SerialDisposable> _disposables =
             new Dictionary<int, SerialDisposable>();
@@ -116,7 +122,8 @@ namespace ReactNative.Views.Image
             else if (count == 1)
             {
                 var uri = ((JObject)sources[0]).Value<string>("uri");
-                SetUriFromSingleSource(view, uri);
+                //SetUriFromSingleSource(view, uri);
+                //Can't use SetUriFromSingleSource here since extraData is not supported on SetSource
             }
             else
             {
@@ -150,7 +157,7 @@ namespace ReactNative.Views.Image
                     return;
                 }
 
-                SetUriFromMultipleSources(view);
+                ChooseUriFromMultipleSources(view);
             }
         }
         
@@ -241,7 +248,7 @@ namespace ReactNative.Views.Image
         public override void SetDimensions(Border view, Dimensions dimensions)
         {
             base.SetDimensions(view, dimensions);
-            SetUriFromMultipleSources(view);
+            ChooseUriFromMultipleSources(view);
         }
 
         private void OnImageFailed(Border view)
@@ -275,7 +282,7 @@ namespace ReactNative.Views.Image
         /// </summary>
         /// <param name="view">The image view instance.</param>
         /// <param name="source">The source URI.</param>
-        private async void SetUriFromSingleSource(Border view, string source)
+        private async void SetUriFromSingleSource(Border view, string source, Color? tintColor, Color? backgroundColor)
         {
             var imageBrush = (ImageBrush)view.Background;
             var tag = view.GetTag();
@@ -310,7 +317,15 @@ namespace ReactNative.Views.Image
                     var image = await ImageCache.Instance.GetFromCacheAsync(new Uri(source), true);
                     var metadata = new ImageMetadata(source, image.PixelWidth, image.PixelHeight);
                     OnImageStatusUpdate(view, ImageLoadStatus.OnLoad, metadata);
-                    imageBrush.ImageSource = image;
+                    if (tintColor == null && backgroundColor == null)
+                        imageBrush.ImageSource = image;
+                    else
+                    {
+                        using (var stream = await CreateStreamFromHttpUri(source))
+                        {
+                            imageBrush.ImageSource = await ColorizeBitmap(stream, tintColor, backgroundColor);
+                        }
+                    }
                     OnImageStatusUpdate(view, ImageLoadStatus.OnLoadEnd, metadata);
                 }
                 catch
@@ -320,14 +335,144 @@ namespace ReactNative.Views.Image
             }
             else
             {
-                var image = new BitmapImage();
-                disposable.Disposable = image.GetUriLoadObservable().Subscribe(
-                    status => OnImageStatusUpdate(view, status.LoadStatus, status.Metadata),
-                    _ => OnImageFailed(view));
-                image.UriSource = new Uri(source);
-                imageBrush.ImageSource = image;
+                if (tintColor != null || backgroundColor != null)
+                {
+                    using (var stream = await CreateStreamFromAppUri(source))
+                    {
+                        imageBrush.ImageSource = await ColorizeBitmap(stream, tintColor, backgroundColor);
+                    }
+                }
+                else
+                {
+                    var image = new BitmapImage();
+                    disposable.Disposable = image.GetUriLoadObservable().Subscribe(
+                        status => OnImageStatusUpdate(view, status.LoadStatus, status.Metadata),
+                        _ => OnImageFailed(view));
+                    image.UriSource = new Uri(source);
+                    imageBrush.ImageSource = image;
+                } 
             }
         }
+
+        private static async Task<IRandomAccessStream> CreateStreamFromAppUri(string source)
+        {
+            return await RandomAccessStreamReference.CreateFromUri(new Uri(source)).OpenReadAsync();
+        }
+
+        private static async Task<IRandomAccessStream> CreateStreamFromHttpUri(string source)
+        {
+            /* We could use RandomAccessStreamReference.CreateFromUri(source).OpenReadAsync()
+             *  if it didn't mysteriously occasionally fail with dev server.
+             *  Therefore we have to climb the tree with feet first.
+             */
+            var response = await WebRequest.CreateHttp(source).GetResponseAsync();
+            using (var responseStream = response.GetResponseStream())
+            {
+                using (var memStream = new MemoryStream())
+                {
+                    await responseStream.CopyToAsync(memStream);
+                    return memStream.AsRandomAccessStream();
+                }
+            }
+        }
+
+        // Applies tintcolor and backgroundcolor for an image.
+        // Cannot use the stored BitmapImage since there is no way to get raw data.
+        private static async Task<WriteableBitmap> ColorizeBitmap(IRandomAccessStream stream, Color? tintColor, Color? backgroundColor)
+        {
+            var decoder = await BitmapDecoder.CreateAsync(stream);
+
+            var pixelData = await decoder.GetPixelDataAsync(
+                BitmapPixelFormat.Bgra8, // WriteableBitmap uses BGRA format 
+                BitmapAlphaMode.Premultiplied,
+                new BitmapTransform(),
+                ExifOrientationMode.RespectExifOrientation,
+                ColorManagementMode.DoNotColorManage
+            );
+
+            return await BitmapImageHelpers.ColorizePixelData(decoder.PixelWidth, decoder.PixelHeight, pixelData.DetachPixelData(), tintColor, backgroundColor);
+        }
+
+        /// <summary>
+        /// This method should return the <see cref="ReactImageShadowNode"/>
+        /// which will be then used for measuring the position and size of the
+        /// view. 
+        /// </summary>
+        /// <returns>The shadow node instance.</returns>
+        public override ReactImageShadowNode CreateShadowNodeInstance()
+        {
+            return new ReactImageShadowNode();
+        }
+
+        /// <summary>
+        /// Implement this method to receive optional extra data enqueued from
+        /// the corresponding instance of <see cref="ReactShadowNode"/> in
+        /// <see cref="ReactShadowNode.OnCollectExtraUpdates"/>.
+        /// </summary>
+        /// <param name="view">The view.</param>
+        /// <param name="extraData">The extra data.</param>
+        public override void UpdateExtraData(Border view, object extraData)
+        {
+            Tuple<JArray, Color?, Color?> imageExtraData = (Tuple<JArray, Color?, Color?>)extraData;
+            var imageBrush = (ImageBrush)view.Background;
+
+            OnImageStatusUpdate(view, ImageLoadStatus.OnLoadStart, new ImageMetadata());
+            //            OnImageStatusUpdate(view, new ImageStatusEventData(ImageLoadStatus.OnLoadStart));
+
+            var sources = imageExtraData.Item1;
+            var tintColor = imageExtraData.Item2;
+            var backgroundColor = imageExtraData.Item3;
+
+            var count = sources.Count;
+
+            // There is no image source
+            if (count == 0)
+            {
+                throw new ArgumentException("Sources must not be empty.", nameof(sources));
+            }
+            // Optimize for the case where we have just one uri, case in which we don't need the sizes
+            else if (count == 1)
+            {
+                var uri = ((JObject)sources[0]).Value<string>("uri");
+                SetUriFromSingleSource(view, uri, tintColor, backgroundColor);
+            }
+            else
+            {
+                var viewSources = default(List<KeyValuePair<string, double>>);
+                var tag = view.GetTag();
+
+                if (_imageSources.TryGetValue(tag, out viewSources))
+                {
+                    viewSources.Clear();
+                }
+                else
+                {
+                    viewSources = new List<KeyValuePair<string, double>>(count);
+                    _imageSources.Add(tag, viewSources);
+                }
+
+                foreach (var source in sources)
+                {
+                    var sourceData = (JObject)source;
+                    viewSources.Add(
+                        new KeyValuePair<string, double>(
+                            sourceData.Value<string>("uri"),
+                            sourceData.Value<double>("width") * sourceData.Value<double>("height")));
+                }
+
+                viewSources.Sort((p1, p2) => p1.Value.CompareTo(p2.Value));
+
+                if (double.IsNaN(view.Width) || double.IsNaN(view.Height))
+                {
+                    // If we need to choose from multiple URIs but the size is not yet set, wait for layout pass
+                    return;
+                }
+
+                var uriToLoad = ChooseUriFromMultipleSources(view);
+                SetUriFromSingleSource(view, uriToLoad, tintColor, backgroundColor);
+            }
+        }
+
 
         /// <summary>
         /// Chooses the uri with the size closest to the target image size. Must be called only after the
@@ -335,15 +480,16 @@ namespace ReactNative.Views.Image
         /// two sources to choose from.
         /// </summary>
         /// <param name="view">The image view instance.</param>
-        private void SetUriFromMultipleSources(Border view)
+        private string ChooseUriFromMultipleSources(Border view)
         {
             var sources = default(List<KeyValuePair<string, double>>);
             if (_imageSources.TryGetValue(view.GetTag(), out sources))
             {
                 var targetImageSize = view.Width * view.Height;
                 var bestResult = sources.LocalMin((s) => Math.Abs(s.Value - targetImageSize));
-                SetUriFromSingleSource(view, bestResult.Key);
+                return bestResult.Key;
             }
+            return "";
         }
     }
 }
