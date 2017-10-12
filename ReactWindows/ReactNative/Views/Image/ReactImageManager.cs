@@ -23,7 +23,7 @@ namespace ReactNative.Views.Image
     /// <summary>
     /// The view manager responsible for rendering native images.
     /// </summary>
-    public class ReactImageManager : SimpleViewManager<Border>
+    public class ReactImageManager : BaseViewManager<Border, ReactImageShadowNode>
     {
         private readonly Dictionary<int, List<KeyValuePair<string, double>>> _imageSources =
             new Dictionary<int, List<KeyValuePair<string, double>>>();
@@ -81,7 +81,7 @@ namespace ReactNative.Views.Image
         [ReactProp("resizeMode")]
         public void SetResizeMode(Border view, string resizeMode)
         {
-            if (resizeMode !=  null)
+            if (resizeMode != null)
             {
                 var imageBrush = (ImageBrush)view.Background;
 
@@ -156,7 +156,7 @@ namespace ReactNative.Views.Image
                 SetUriFromMultipleSources(view);
             }
         }
-        
+
         /// <summary>
         /// The border radius of the <see cref="ReactRootView"/>.
         /// </summary>
@@ -274,6 +274,7 @@ namespace ReactNative.Views.Image
         /// <param name="backgroundColor"></param>
         private async void SetUriFromSingleSource(Border view, string source, Color? tintColor = null, Color? backgroundColor = null)
         {
+
             var imageBrush = (ImageBrush)view.Background;
             OnImageStatusUpdate(view, ImageLoadStatus.OnLoadStart, default(ImageMetadata));
             try
@@ -435,5 +436,12 @@ namespace ReactNative.Views.Image
             }
         }
 
+        /// <summary>
+        /// This method should return the <see cref="ReactImageShadowNode"/>
+        /// which will be then used for measuring the position and size of the
+        /// view. 
+        /// </summary>
+        /// <returns>The shadow node instance.</returns>
+        public override ReactImageShadowNode CreateShadowNodeInstance() => new ReactImageShadowNode();
     }
 }

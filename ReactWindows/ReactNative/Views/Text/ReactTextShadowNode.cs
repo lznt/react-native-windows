@@ -1,4 +1,4 @@
-﻿using Facebook.Yoga;
+using Facebook.Yoga;
 using ReactNative.Bridge;
 using ReactNative.Reflection;
 using ReactNative.UIManager;
@@ -223,6 +223,7 @@ namespace ReactNative.Views.Text
                 block.Inlines.Add(ReactInlineShadowNodeVisitor.Apply(child));
             }
             textBlock.Blocks.Add(block);
+
 
             var normalizedWidth = YogaConstants.IsUndefined(width) ? double.PositiveInfinity : width;
             var normalizedHeight = YogaConstants.IsUndefined(height) ? double.PositiveInfinity : height;
